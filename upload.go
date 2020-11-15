@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -275,8 +278,16 @@ func processUpload(upReq UploadRequest) (upload Upload, err error) {
 		}
 	}
 
-	upload.Filename = strings.Join([]string{barename, extension}, ".")
-	upload.Filename = strings.Replace(upload.Filename, " ", "", -1)
+	var filename string
+	filename = strings.Join([]string{barename, extension}, ".")
+	filename = strings.Replace(filename, " ", "", -1)
+
+	filename, reader, err := convertFile(filename, extension, io.MultiReader(bytes.NewReader(header), upReq.src))
+	if err != nil {
+		return upload, fmt.Errorf("Could not convert file: %w", err)
+	}
+
+	upload.Filename = filename
 
 	fileexists, _ := storageBackend.Exists(upload.Filename)
 
@@ -334,12 +345,50 @@ func processUpload(upReq UploadRequest) (upload Upload, err error) {
 		upReq.deleteKey = uniuri.NewLen(30)
 	}
 
-	upload.Metadata, err = storageBackend.Put(upload.Filename, io.MultiReader(bytes.NewReader(header), upReq.src), fileExpiry, upReq.deleteKey, upReq.accessKey)
+	upload.Metadata, err = storageBackend.Put(upload.Filename, reader, fileExpiry, upReq.deleteKey, upReq.accessKey)
 	if err != nil {
 		return upload, err
 	}
 
 	return
+}
+
+func convertFile(filename string, extension string, r io.Reader) (string, io.Reader, error) {
+	if extension == "mov" {
+		newFilename := strings.Replace(filename, ".mov", ".mp4", 1)
+
+		inputFile, err := ioutil.TempFile("", "movinput.*.mov")
+		defer os.Remove(inputFile.Name())
+		if err != nil {
+			return "", nil, err
+		}
+
+		outputFile, err := ioutil.TempFile("", "movoutput.*.mp4")
+		defer os.Remove(outputFile.Name())
+		if err != nil {
+			return "", nil, err
+		}
+
+		content, _ := ioutil.ReadAll(r)
+		if _, err := inputFile.Write(content); err != nil {
+			return "", nil, err
+		}
+
+		cmd := exec.Command("ffmpeg", "-y", "-i", inputFile.Name(), outputFile.Name())
+		err = cmd.Run()
+		if err != nil {
+			return "", nil, err
+		}
+
+		content, err = ioutil.ReadAll(outputFile)
+		if err != nil {
+			return "", nil, err
+		}
+
+		return newFilename, bytes.NewReader(content), nil
+	}
+
+	return filename, r, nil
 }
 
 func generateBarename() string {
